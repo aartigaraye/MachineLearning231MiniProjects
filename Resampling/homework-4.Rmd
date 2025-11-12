@@ -1,0 +1,687 @@
+---
+title: "Homework 3"
+subtitle: "PSTAT 131/231"
+author: "Aarti Garaye"
+output: 
+  pdf_document:
+    includes:
+      in_header: preamble.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE)
+```
+
+# Resampling
+
+For this assignment, we will be working with **two** of our previously used data sets -- one for classification and one for regression. For the classification problem, our goal is (once again) to predict which passengers would survive the Titanic shipwreck. For the regression problem, our goal is (also once again) to predict abalone age.
+
+Load the data from `data/titanic.csv` and `data/abalone.csv` into *R* and refresh your memory about the variables they contain using their attached codebooks.
+
+Make sure to change `survived` and `pclass` to factors, as before, and make sure to generate the `age` variable as `rings` + 1.5!
+
+*Remember that you'll need to set a seed at the beginning of the document to reproduce your results.*
+
+```{r}
+# Setting seed
+set.seed(05172025)
+
+# Loading necessary libraries
+library(tidymodels)
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(knitr)
+library(kableExtra)
+library(corrplot)
+library(corrr)
+library(parsnip)
+library(workflows)
+library(discrim)
+library(kknn)
+library(yardstick)
+library(glmnet)
+library(janitor)
+library(naniar) 
+library(corrplot)
+library(themis) 
+
+# Loading the data
+abalone <- read_csv("data/abalone.csv")
+abalone <- abalone %>%
+  mutate(age = rings + 1.5) %>%
+  select(-rings) # we are dropping rings because age is made from rings
+
+titanic <- read_csv("data/titanic.csv", 
+    col_types = cols(survived = readr::col_factor(levels = c("Yes", 
+        "No")), pclass = readr::col_factor(levels = c("1", 
+        "2", "3")), sex = readr::col_factor(levels = c("male", 
+        "female"))))
+```
+
+\newpage
+
+## Section 1: Regression (abalone age)
+
+#### Question 1
+
+Follow the instructions from [Homework 2]{.underline} to split the data set, stratifying on the outcome variable, `age`. You can choose the proportions to split the data into. Use *k*-fold cross-validation to create 5 folds from the training set.
+
+Set up the same recipe from [Homework 2]{.underline}.
+
+**Solution:** Before we choose the proportions to split the data, we should check how many observations does the dataset has and then decide what would be the appropriate split.
+```{r}
+kable(nrow(abalone), caption = "Total number of observations in the Abalone dataset.")
+```
+The total abalone dataset has a total of 4177 observations. In this case 70-30 or 80-20 split would be appropriate. I will go with the 80-20 split just like we did in homework 2. 
+
+To split the data into the training set and the testing set using stratified sampling, we can stratify based on a the `age` variable. The popular choice is a $80/20$ split for training and testing, thus, I will be doing the same.
+
+```{r}
+abalone_splits <- initial_split(abalone, prop = 0.80,
+                                strata = age)
+abalone_train <- training(abalone_splits)
+abalone_test <- testing(abalone_splits)
+```
+
+Above code splits the `Abalone` dataset in $80/20$ split where $80\%$ of the data is in the training set, and $20\%$ of the data is in the testing set. Note, that we have already set seed in the introductory code chunk where all the necessary libraries and the data is loaded. 
+
+We can use the `vfold_cv()` to create 5 folds from the training set. Follow the code below
+```{r}
+abalone_folds <- vfold_cv(abalone_train, v = 5)
+abalone_folds$splits
+```
+One fo the fold that's left for assessment contains 668 observations and the other have 2672 observations to train the model on. Total in each fold is 3340. 
+
+The instructions for setting a recipe in homework 2 was:
+
+\textcolor{blue}{Create a recipe predicting the outcome variable, "age", with all other predictor variables. Note that you should not include "rings" to predict "age".}
+
+\textcolor{blue}{Steps for your recipe:}
+
+\textcolor{blue}{1.  dummy code any categorical predictors}
+
+\textcolor{blue}{2.  create interactions between\\
+\phantom \quad - "type" and "shucked{\_}weight",\\
+\phantom \quad - "longest{\_}shell" and "diameter",\\
+\phantom \quad - "shucked{\_}weight" and "shell{\_}weight"}
+
+\textcolor{blue}{3.  center all predictors, and}
+
+\textcolor{blue}{4.  scale all predictors.}
+
+Note, that we have already removed `rings` from the dataset so we wouldn't have to remove it again. Follow the code below for the abalone recipe from homework 2. 
+```{r}
+abalone_recipe <- recipe(age ~ ., data = abalone_train) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_interact(terms = ~ starts_with("type_"):shucked_weight) %>%
+  step_interact(terms = ~ longest_shell:diameter) %>%
+  step_interact(terms = ~ shucked_weight:shell_weight) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+
+prep(abalone_recipe) %>%
+  bake(new_data = abalone_train) %>%
+  head() %>%
+  kable(caption = 
+          "Data with dummy coding, interaction terms, 
+        centering all predictors, and scaling all predictors.", 
+        "latex", booktabs = T) %>%
+  kable_styling(latex_options = c("scale_down", "hold_position"))
+```
+
+\newpage
+
+#### Question 2
+
+In your own words, explain what we are doing when we perform *k*-fold cross-validation:
+
+-   What **is** *k*-fold cross-validation?
+
+-   Why should we use it, rather than simply comparing our model results on the entire training set?
+
+-   If we split the training set into two and used one of those two splits to evaluate/compare our models, what resampling method would we be using?
+
+\textbf{Solution:} Before the resampling methods, we were splitting our data as training and testing. Once we fit our model on the training data we just use to test it on the testing to get the test MSE. However, that does not allow us to tune or tweak the model because now we have no way to measure how the model would do after the alterations because we would have no testing data. Once we use our testing data, it becomes a part of how the model is being trained. 
+
+To avoid this, we try to estimate our test MSE by various resampling method. The resampling methods split the training data such that we have some data to train and some to assess so that we can predict the test MSE. One such approach is a validation set. We split the traning data into two, a training set and a validation set. We use the training set to train our model and use the validation set to predict the test MSE. Each model gives us a different validation error and we choose the model with the least validation error. As a result we have a lot of variance between the validation errors across models. We want to train our model on as much data as we can and this is a very dangerous process when we have small datasets. Let's say we split our data as a 70-30 split between training and testing and then further split the training and validation as 75-25 split. Now our training is actually 75 percent of 70 percent, which is around 52%. Thus, validation method is seen as waste of data. A better resampling method is the k-fold cross validation.
+
+K-fold cross validation is a resampling method where the users can choose $k$. What this means is that each observation in the dataset will be randomly assigned to a number of fold. If we see folds as colors, and let's say $k$ is 5 then each observation in the training set will be assigned to one of the five colors randomly. Then, the data is split randomly (essentially a random resample) in one of the folds and one group (observations of one color) is held out which serves as the assessment group of that fold. Thus, there would be $k$ number of folds and each "type" of fold (unique) will be held out for assessment. Then each of our models is fit to each fold and we record the assessment error within each fold. This is then averaged out which gives us a better estimate of the testing error. It reduces data waste but computation time blows up. Research shows that best $k$ to use is either $5$ or $10$. 
+
+We should use the $k$ fold cross validation as it reduces variability as the average has lesser variability than the individual like it did in the validation approach. Furthermore, taking average of the assessment sets (aka validation sets within each folds) across folds is a better estimate since mean is a good predictor, generally. So, when performing the $k$-fold cross validation we can expect to have a $k$ "validation" MSE. In this case the fold (color) that was held out is known as the validation set. Moreover, since they are a random resample every time of the training set, the chances of overfitting is reduced as well. 
+
+\newpage
+
+#### Question 3
+
+Set up workflows for three models:
+
+1.  *k*-nearest neighbors with the `kknn` engine, tuning `neighbors`;
+2.  linear regression;
+3.  elastic net **linear** regression, tuning `penalty` and `mixture`.
+
+Use `grid_regular` to set up grids of values for all of the parameters we're tuning. Use values of `neighbors` from $1$ to $10$, the default values of penalty, and values of mixture from $0$ to $1$. Set up 10 levels of each.
+
+How many models total, **across all folds**, will we be fitting to the **abalone** **data**? To answer, think about how many folds there are, how many combinations of model parameters there are, and how many models you'll fit to each fold.
+
+\textbf{Solution:} Setting up the three workflows for the given models.
+
+For the *k*-nearest neighbor:
+```{r}
+# Setting engine
+abalone_knn_model <- nearest_neighbor(neighbors = tune()) %>%
+  set_engine("kknn") %>%
+  set_mode("regression")
+
+# Setting workflow
+abalone_knn_workflow <- workflow() %>%
+  add_model(abalone_knn_model) %>%
+  add_recipe(abalone_recipe)
+```
+
+For the linear regression:
+```{r}
+# Setting engine
+abalone_lm_model <- linear_reg() %>%
+  set_engine("lm")
+
+# Setting workflow
+abalone_lm_workflow <- workflow() %>%
+  add_model(abalone_lm_model) %>%
+  add_recipe(abalone_recipe)
+```
+
+For elastic net
+```{r}
+# Setting engine
+abalone_en_model <- linear_reg(mixture = tune(), penalty = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("glmnet")
+
+# Setting workflow
+abalone_en_workflow <- workflow() %>%
+  add_model(abalone_en_model) %>%
+  add_recipe(abalone_recipe)
+```
+
+Now we need to use `grid_regular()` to specify the values to tune our hyperparamets.
+```{r}
+abalone_grid_en <- grid_regular(penalty(),
+                                mixture(range = c(0,1),
+                                        trans = NULL),
+                                levels = 10)
+
+abalone_grid_knn <- grid_regular(neighbors(range = c(1, 10)),
+                         levels = 10)
+```
+
+To answer how many total model we will be fitting across all folds we have to think about how many folds and how many models. We know that in $k$-fold cross validation each of our models is fit on each of the folds. Just thinking about the $k$-nearest neighbor we set our range from $1$ to $10$ which means that for every $k$ it is a new model. Thus, we have $10$ knn models. Then we have the linear regression and we have the elastic net with penalty range from $-10$ to $0$ which is a $\log_{10}$transform and with a mixture from $0$ to $1$, with $10$ levels. These levels are important because that's how the range of penalty and mixture and neighbors are broken. 
+
+Thus, we will be having $10$ KNN models, $1$ regular linear regression (OLS) model, and the $10 \times 10 = 100$ elastic net. That's total of $111$ models. Recall, that we are performing a $5$-fold cross validation which means each of these $111$ model is going to be fit to each of the $5$ folds. That is a total of $5 \times 111 = 555$ models. This can also be seen as $5(10\text{ KNN }) + 5(1\text{ linear regression }) + 5(100\text{ elastic net }) = 555\text{ models}$
+
+\newpage
+
+#### Question 4
+
+Fit all the models you created in Question 3 to your folded data.
+
+*Suggest using `tune_grid()`; see the documentation and examples included for help by running `?tune_grid`*. *You can also see the code in **Lab 4** for help with the tuning process.*
+
+\textbf{Solution:} Now that we have everything we need to fit the models, we can begin the tuning process. This follow code chunk takes the longest to run because it involves fitting the models and as we saw in the previous problem we have a total of $555$ model. Note, that we have set seed in the introductory code chunk for reproducibility. 
+```{r}
+tune_abalone_lr <- tune_grid(
+  abalone_lm_workflow,
+  resamples = abalone_folds
+)
+
+tune_abalone_knn <- tune_grid(
+  abalone_knn_workflow,
+  resamples = abalone_folds,
+  grid = abalone_grid_knn
+)
+
+tune_abalone_en <- tune_grid(
+  abalone_en_workflow,
+  resamples = abalone_folds,
+  grid = abalone_grid_en
+)
+```
+
+
+\newpage
+
+#### Question 5
+
+Use `collect_metrics()` to print the mean and standard errors of the performance metric ***root mean squared error (RMSE)*** for each model across folds.
+
+Decide which of the models has performed the best. Explain how/why you made this decision. Note that each value of the tuning parameter(s) is considered a different model; for instance, KNN with $k = 4$ is one model, KNN with $k = 2$ another.
+
+\textbf{Solution:} Follow the code below to see the RMSE for each model across folds
+```{r}
+collect_metrics(tune_abalone_lr)
+collect_metrics(tune_abalone_knn)
+collect_metrics(tune_abalone_en)
+```
+It looks like the lease RMSE is found in the elastic net models, however, we don't know what combination of penalty and mixture is giving us that. To see what is the best models across all of them we can compare across all models. Note, that the linear regression model is the only one in the metric, we don't need to select the one that has the lowest standard error for that one. 
+```{r}
+# KNN
+best_knn_abalone <- select_by_one_std_err(tune_abalone_knn,
+                                         metric = "rmse",
+                                         neighbors)
+best_knn_abalone
+
+collect_metrics(tune_abalone_knn) %>%
+  filter(.config == best_knn_abalone$.config,
+         .metric == "rmse")
+
+# Elastic Net
+best_en_abalone <- select_by_one_std_err(tune_abalone_en,
+                                         metric = "rmse",
+                                         penalty,
+                                         mixture)
+best_en_abalone
+
+collect_metrics(tune_abalone_en) %>%
+  filter(.config == best_en_abalone$.config,
+         .metric == "rmse")
+```
+Just based on the RMSE, the lowest is the KNN model with 8 neighbors. Note, that the OLS linear regression is only one model with a higher RMSE as shown above. The elastic net with a really small penalty and a mixture of $0.\bar{1}$ is very close. This shows the best standard error and the simplicity ratio. If we just chose solely based on the lowest standard error we might get a little difference in the standard error but the model would be much more complex. Let's see if that is true.
+
+```{r}
+# KNN
+best_knn_abalone2 <- show_best(tune_abalone_knn)
+
+collect_metrics(tune_abalone_knn) %>%
+  filter(.config == best_knn_abalone2$.config,
+         .metric == "rmse")
+
+# Elastic Net
+best_en_abalone2 <- show_best(tune_abalone_en)
+
+collect_metrics(tune_abalone_en) %>%
+  filter(.config == best_en_abalone2$.config,
+         .metric == "rmse")
+```
+Focusing on the KNN model, the least standard error is when there are 9 neighbors, but note the difference between the standard error between a model with 9 neighbors and 8 neighbors is not that much. It's not statistically significant, so we will choose the model with 8 neighbors because it's way less complex. Similarly, for the elastic net, the penalty is the same but the mixture is now $0.\bar{2}$ with not that much difference in the standard error. Thus, the `select_by_one_std_err()` uses the "one-standard-error-rule" that selects the most simple model that is within one standard error of the numerically optimal results. 
+
+Thus, I choose the model `r best_knn_abalone$.config` which has the standard error of \textbf{$0.04256761$}.
+
+\newpage
+
+#### Question 6
+
+Use `finalize_workflow()` and `fit()` to fit your chosen model to the entire **training set**.
+
+Lastly, use `augment()` to assess the performance of your chosen model on your **testing set**. Compare your model's **testing** RMSE to its average RMSE across folds.
+
+\textbf{Solution:} To update and finalize the recipes we can use `finalize_workflow()` by fitting our best model that we chose in the above question to the entire training set. Recall, that the best model was the KNN with $8$ neighbors and RMSE of $0.04256761$. 
+```{r}
+final_abalone_train <- finalize_workflow(abalone_knn_workflow,
+                                         best_knn_abalone)
+
+final_abalone_train <- fit(final_abalone_train,
+                           data = abalone_train)
+```
+
+The final model can now be applied on our testing data sets to assess its ability to generalize to brand new data. We can use `augment()` to assess the performance on the testing set.
+
+```{r}
+augment(final_abalone_train, new_data = abalone_test) %>%
+  rmse(truth = age, estimate = .pred) %>%
+  kable(caption = "The metrics for the KNN model when 
+        fit for the testing data.")
+```
+The test RMSE is around $2.346574$ for the abalone dataset when predicting age. Note that we used tidymodels for calculating the RMSE. Using tidymodels is advantageous as it gives us the average RMSE across folds when we use `tune_gird` and `collect_metric`. Thus, the average RMSE across folds for this KNN model with 8 neighbors was $2.318967$ compared to the test RMSE of $2.346574$. As we can see these are very close and gives doing a 5-fold cross validation gives us a close estimate to the test RMSE. 
+
+\newpage
+
+## Section 2: Classification (Titanic survival)
+
+#### Question 7
+
+Follow the instructions from [Homework 3]{.underline} to split the data set, stratifying on the outcome variable, `survived`. You can choose the proportions to split the data into. Use *k*-fold cross-validation to create 5 folds from the training set.
+
+\textbf{Solution:} Let's check the total observations to decide the appropriate split in the titanic dataset. 
+```{r}
+kable(nrow(titanic), caption = "The total number of observations in the dataset")
+```
+It's a relatively small dataset so a $70-30$ split would be a little problamatic, we should split it as a $80-20$ split, stratified on `survived.` As seen in Homework 3, the distribution of survived is a little skewed, there are significantly more non-survivors in the dataset. Here's a look of the skewed distribution
+```{r, fig.align='center', fig.show='hold', fig.cap="From the graph above it seems that the distribution of our outcome variable is skewed more towards 'no.' This means that there are more non survivors than survivors."}
+ggplot(titanic, aes(x=survived)) +
+  geom_bar() +
+  theme_bw()
+```
+Thus, the split should look like
+```{r}
+titanic_split <- initial_split(titanic, prop = 0.80,
+                                strata = survived)
+
+titanic_train <- training(titanic_split)
+titanic_test <- testing(titanic_split)
+
+titanic_folds <- vfold_cv(titanic_train, v = 5)
+```
+
+However, note that there are some missing values in the dataset, 
+```{r, fig.align='center', fig.show='hold', fig.cap="There seems to be around 20 percent of age variable missing from the data and about 76 percent in cabin. We can suspect that age would be more correlated with survival rates. Thus, we should focus on imputing age."}
+vis_miss(titanic_train)
+```
+Note that a lot of `age` is missing so when we are creating a recipe we must impute it with the closest variables `sib_sp` and `parch` 
+
+
+\newpage
+
+#### Question 8
+
+Set up the same recipe from [Homework 3]{.underline} -- but this time, add `step_upsample()` so that there are equal proportions of the `Yes` and `No` levels (you'll need to specify the appropriate function arguments). *Note: See Lab 5 for code/tips on handling imbalanced outcomes.*
+
+\textbf{Solution:} The instructions from homwork 3 are as follow
+
+\textcolor{blue}{Create a recipe predicting the outcome variable "survived". Include the following predictors: ticket class, sex, age, number of siblings or spouses aboard, number of parents or children aboard, and passenger fare.}
+
+\textcolor{blue}{Recall that there were missing values for "age". To deal with this, add an imputation step using "step{\_}impute{\_}linear()". Next, use "step{\_}dummy()" to dummy encode categorical predictors. Finally, include interactions between \\
+\phantom \quad -  Sex and passenger fare, and \\
+\phantom \quad -  Age and passenger fare.}
+
+
+```{r}
+titanic_recipe <- recipe(survived ~ pclass + sex + age + sib_sp + 
+                            parch + fare, data = titanic_train) %>%
+  step_impute_linear(age, impute_with = imp_vars(sib_sp, parch)) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_interact(terms = ~ sex_female:fare) %>%
+  step_interact(terms = ~ age:fare) %>%
+  step_normalize(all_predictors()) %>%
+  step_upsample(survived, over_ratio = 0.5) 
+
+prep(titanic_recipe) %>%
+  bake(new_data=titanic_train) %>%
+  group_by(survived) %>%
+  summarise(count = n()) %>%
+  kable(caption = "Survived count after upsampling") 
+```
+
+We’ll use `over_ratio = 0.5` here so that there will be approximately half as many yess as there are nos. The default is `over_ratio = 1`, but that can also result in overfitting problems, so there is a tradeoff involved. Note, that there are almost half as many yess as nos. 
+
+\newpage
+
+#### Question 9
+
+Set up workflows for three models:
+
+1.  *k*-nearest neighbors with the `kknn` engine, tuning `neighbors`;
+2.  logistic regression;
+3.  elastic net **logistic** regression, tuning `penalty` and `mixture`.
+
+Set up the grids, etc. the same way you did in Question 3. Note that you can use the same grids of parameter values without having to recreate them.
+
+\textbf{Solution:} Setting up the three workflows for the given models.
+
+For KNN
+```{r}
+# Setting engine
+titanic_knn_model <- nearest_neighbor(neighbors = tune()) %>%
+  set_engine("kknn") %>%
+  set_mode("classification")
+
+# Setting workflow
+titanic_knn_workflow <- workflow() %>%
+  add_model(titanic_knn_model) %>%
+  add_recipe(titanic_recipe)
+```
+
+For Logistic regression
+```{r}
+# Setting engine
+titanic_lr_model <- logistic_reg() %>%
+  set_engine("glm") %>%
+  set_mode("classification")
+
+# Setting workflow
+titanic_lr_workflow <- workflow() %>%
+  add_model(titanic_lr_model) %>%
+  add_recipe(titanic_recipe)
+```
+
+For elastic net
+```{r}
+# Setting engine
+titanic_en_model <- logistic_reg(mixture = tune(),
+                                 penalty = tune()) %>%
+  set_engine("glmnet") %>%
+  set_mode("classification")
+
+# Setting workflow
+titanic_en_workflow <- workflow() %>%
+  add_model(titanic_en_model) %>%
+  add_recipe(titanic_recipe)
+```
+
+Now that we have set the engines and the workflows we can make the grids. Note, that we can use the same grids as we did for abalone. 
+```{r}
+titanic_grid_en <- grid_regular(penalty(),
+                                mixture(range = c(0,1),
+                                        trans = NULL),
+                                levels = 10)
+
+titanic_grid_knn <- grid_regular(neighbors(range = c(1, 10)),
+                         levels = 10)
+```
+
+
+\newpage
+
+#### Question 10
+
+Fit all the models you created in Question 9 to your folded data.
+
+\textbf{Solution:} We can now proceed to fit the models to our folded data. Follow the code below
+```{r}
+tune_titanic_lr <- tune_grid(
+  titanic_lr_workflow,
+  resamples = titanic_folds
+)
+
+tune_titanic_knn <- tune_grid(
+  titanic_knn_workflow,
+  resamples = titanic_folds,
+  grid = titanic_grid_knn
+)
+
+tune_titanic_en <- tune_grid(
+  titanic_en_workflow,
+  resamples = titanic_folds,
+  grid = titanic_grid_en
+)
+```
+
+Note that we had set seed in the introductory chunk so we don't have to worry about reproducibility being a problem. 
+
+\newpage
+
+#### Question 11
+
+Use `collect_metrics()` to print the mean and standard errors of the performance metric ***area under the ROC curve*** for each model across folds.
+
+Decide which of the models has performed the best. Explain how/why you made this decision.
+
+\textbf{Solution:} Let's look at the different area under the ROC curve for the different models across the folds
+```{r}
+collect_metrics(tune_titanic_lr)
+collect_metrics(tune_titanic_knn)
+collect_metrics(tune_titanic_en)
+```
+We want the area under the ROC curve to be as close to $1$, if the area under the ROC curve is close to $0.5$ then the model is just randomly classifying the observations. We get some good area under the curve with the elastic net and the KNN models. To see which on has the best area under the curve we can use `show_best()` or what we did with the abalone dataset `select_by_one_std_err()` so we can choose a model which has the best area under the ROC curve and is the simplest in those terms. 
+
+```{r}
+show_best(tune_titanic_knn,
+          metric = "roc_auc")
+
+show_best(tune_titanic_en,
+          metric = "roc_auc")
+```
+As we can see these are pretty close so let's use the `select_by_one_std_err()`
+
+```{r}
+best_knn_titanic <- select_by_one_std_err(tune_titanic_knn,
+                                          metric = "roc_auc",
+                                          neighbors)
+best_knn_titanic
+
+collect_metrics(tune_titanic_knn) %>%
+  filter(.config == best_knn_titanic$.config,
+         .metric == "roc_auc")
+```
+The mean area under the ROC curve with $5$ neighbors is $0.821595$ which is pretty good for this model. Let's see whether the elastic net is better than this.
+
+```{r}
+best_en_titanic <- select_by_one_std_err(tune_titanic_en,
+                                          metric = "roc_auc",
+                                          penalty,
+                                         mixture)
+best_en_titanic
+
+collect_metrics(tune_titanic_en) %>%
+  filter(.config == best_en_titanic$.config,
+         .metric == "roc_auc")
+```
+Note, that in this case both the penalty and mixture are close to zero, then this essentially becomes a ridge regression. Some might argue that there is some small penalty present so it's not a ridge, but there's no doubt that it's a model very close to a pure ridge regression. The mean area under the ROC curve for this is $0.8366913$ which is slightly better than the KNN model so we can conclude that the best model for the titanic classification is the elastic net with penalty of 1e-10 and mixture 0. Thus, we choose the model Preprocessor1_Model001.  
+
+
+\newpage
+
+#### Question 12
+
+Use `finalize_workflow()` and `fit()` to fit your chosen model to the entire **training set**.
+
+Lastly, use `augment()` to assess the performance of your chosen model on your **testing set**. Compare your model's **testing** ROC AUC to its average ROC AUC across folds.
+
+\textbf{Solution:} Now that the best models according to the area under the curve metric has been chosen we can finalize the workflow and see how they perform on the testing set. 
+
+```{r}
+final_titanic_train <- finalize_workflow(titanic_en_workflow,
+                                         best_en_titanic)
+
+final_titanic_train <- fit(final_titanic_train,
+                           data = titanic_train)
+
+augment(final_titanic_train, new_data = titanic_test) %>%
+  roc_auc(survived, .pred_Yes)
+```
+So the area under the curve for the testing set is $0.8706192$ which is actually better than the average area under the ROC curve for our 5 folds, which was $0.8366913$. Note, we used tidymodels which already gives us the average across the folds.
+
+\newpage
+
+## Required for 231 Students
+
+Consider the following intercept-only model, with $\epsilon \sim N(0, \sigma^2)$:
+
+$$
+Y=\beta+\epsilon
+$$
+
+where $\beta$ is the parameter that we want to estimate. Suppose that we have $n$ observations of the response, i.e. $y_{1}, ..., y_{n}$, with uncorrelated errors.
+
+\newpage
+
+### Question 13
+
+Derive the least-squares estimate of $\beta$.
+
+\textbf{Solution:} To derive $\beta$, we must minimize the sum of squared residuals i.e. minimize the error. Note,
+$$
+\epsilon = Y - \beta
+$$
+Then,
+$$
+SSR = \sum_{i=1}^{n} (Y_{i} - \beta)^{2}
+$$
+To minimize this we must take the derivative with respect to $\beta$. Then,
+$$
+\frac{d}{d\beta} \sum_{i=1}^{n} (Y_{i} -\beta)^{2}
+$$
+$$
+= \sum_{i=1}^{n} 2(-1)(Y_{i} -\beta)
+$$
+$$
+= \sum_{i=1}^{n} 2(\beta - Y_{i})
+$$
+$$
+= \sum_{i=1}^{n} 2\beta -  \sum_{i=1}^{n} 2Y_i
+$$
+$$
+= 2\beta n - \sum_{i=1}^{n} 2Y_{i}
+$$
+To minimize we must set it equal to $0$. Then,
+$$
+2\beta n - \sum_{i=1}^{n} 2Y_{i} = 0
+$$
+$$
+\beta = \frac{2\sum_{i=1}^{n} Y_{i}}{2n}
+$$
+$$
+\boxed{\beta = \frac{1}{n}\sum_{i=1}^{n}Y_{i} = \bar{Y}}
+$$
+
+\newpage
+
+### Question 14
+
+Suppose that we perform leave-one-out cross-validation (LOOCV). Recall that, in LOOCV, we divide the data into $n$ folds.
+
+Derive the covariance between $\hat{\beta}^{(1)}$, or the least-squares estimator of $\beta$ that we obtain by taking the first fold as a training set, and $\hat{\beta}^{(2)}$, the least-squares estimator of $\beta$ that we obtain by taking the second fold as a training set?
+
+\textbf{Solution:} We are still working with the intercept-only model, however, now we are in the LOOCV scenario. We need to make some adjustments to the $\beta$ we found in the earlier question. As mentioned, in LOOCV we split the training data in $n$ folds and each fold leaves $1$ observation as assessment. 
+
+Let's say the first fold left $y_{1}$ for assessment. Then the $\hat{\beta}^{(1)}$ is the estimation on $n-1$ observations, since it is on the training set. Then,
+$$
+\hat{\beta}^{(1)} = \frac{1}{n-1} \sum_{i=2}^{n}y_{i}
+$$
+In the second fold, let's say we left $y_{2}$ out for assessment, then it is still an average on $n-1$ observations, but,
+$$
+\hat{\beta}^{(2)} = \frac{1}{n-1} \sum_{i=1, i \ne 2}^{n}y_{i}
+$$
+Note that these both are just linear combination of $y_{i}$ then we can rewrite this as:
+$$
+\hat{\beta}^{(1)} = \sum_{i=1}^{n} a_{i}y_i \text{ where } a_{1} = 0 \text{ and } a_{i} = \frac{1}{n-1} \text{ for } i \ge 2
+$$
+and,
+$$
+\hat{\beta}^{(2)} = \sum_{i=1}^{n} b_{i}y_i \text{ where } b_{2} = 0 \text{ and } b_{i} = \frac{1}{n-1} \text{ for } i \ne 2
+$$
+Then,
+$$
+Cov\left(\hat{\beta}^{(1)}, \hat{\beta}^{(2)}\right) = Cov \left(\sum_{i=1}^{n} a_{i}y_i, \sum_{i=1}^{n} b_{i}y_i \right)
+$$
+$$
+= \sum_{i=1}^{n} a_{i}b_{i} Cov(y_{i}, y_{i})
+$$
+$$
+= \sum_{i=1}^{n} a_{i}b_{i} Var(y_{i})
+$$
+$$
+= \sum_{i=1}^{n} a_{i}b_{i} Var(\beta + \epsilon)
+$$
+$$
+= \sum_{i=1}^{n} a_{i}b_{i} Var(\epsilon)
+$$
+$$
+= \sum_{i=1}^{n} a_{i}b_{i} \cdot \sigma^{2}
+$$
+Note for $i = 1, a_{i} = 0$ and for $i = 2, b_{i} = 0$, then we must consider
+$$
+\sum_{i=3}^{n} a_{i}b_{i} \cdot \sigma^{2}
+$$
+Note, for $i = 3, 4, ..., n$ $a_{i} = b_{i}$ Then,
+$$
+\sum_{i=3}^{n} a_{i}b_{i} \cdot \sigma^{2} = \sum_{i=3}^{n} \left(\frac{1}{n-1} \right)^2 \cdot \sigma^{2}
+$$
+Note, there are $2$ observations shared between two folds for LOOCV. Then,
+$$
+\sum_{i=3}^{n} \left(\frac{1}{n-1} \right)^2 \cdot \sigma^{2} = (n-2) \frac{1}{(n-1)^2} \sigma^{2}
+$$
+$$
+\boxed{\frac{\sigma^{2} (n-2)}{(n-1)^{2}}}
+$$
